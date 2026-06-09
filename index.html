@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2026년 캐스케이드/NFB790 오프라인 교육 신청</title>
+    <!-- CSS: Tailwind & FontAwesome -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Pretendard:wght@400;600;700&display=swap');
+        body { font-family: 'Pretendard', sans-serif; background-color: #f8fafc; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        .loading-overlay { background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(4px); }
+        
+        /* 캘린더 스타일 */
+        .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; }
+        .calendar-day { 
+            aspect-ratio: 1/1; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            justify-content: center; 
+            border-radius: 12px; 
+            cursor: pointer; 
+            transition: all 0.2s;
+            position: relative;
+            border: 1px solid transparent;
+        }
+        .calendar-day.disabled { cursor: not-allowed; opacity: 0.2; pointer-events: none; }
+        .calendar-day.target { background-color: #f1f5f9; border-color: #e2e8f0; }
+        .calendar-day.target:hover { background-color: #e0f2fe; border-color: #bae6fd; transform: translateY(-1px); }
+        .calendar-day.selected { background-color: #2563eb !important; color: white !important; font-weight: bold; border-color: #2563eb; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.2); }
+        
+        .calendar-day.has-dot::after {
+            content: '';
+            position: absolute;
+            bottom: 6px;
+            width: 4px;
+            height: 4px;
+            background-color: #3b82f6;
+            border-radius: 50%;
+        }
+        .calendar-day.selected::after { background-color: white; }
+
+        .session-btn { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); border-width: 2px; }
+        .session-btn.selected { 
+            border-color: #2563eb; 
+            background-color: #eff6ff; 
+            box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.1);
+            transform: translateY(-2px);
+        }
+        .session-btn:not(:disabled):hover {
+            transform: translateY(-1px);
+            border-color: #3b82f6;
+        }
+    </style>
+</head>
+<body>
+    <div id="app"></div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getFirestore, collection, doc, onSnapshot, runTransaction, query, getDocs, deleteDoc, setDoc } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+
+        // --- 1. 환경 설정 ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyCHZ4mmnkEkbfdB-n-MuxAYgZY793opNIQ",
+            authDomain: "fan-edu-v1.firebaseapp.com",
+            projectId: "fan-edu-v1",
+            storageBucket: "fan-edu-v1.firebasestorage.app",
+            messagingSenderId: "363111742847",
+            appId: "1:363111742847:web:1c00d8ef30c229cc196e4a",
+            measurementId: "G-8BLR7P7N97"
+        };
+
+        // 데이터베이스 공간 분리 (새로운 앱 ID 부여)
+        const appId = 'navien-cascade-edu-2026'; 
+        
+        // 정원 30명 설정
+        const MAX_CAPACITY = 30;
+        const ADMIN_PASSWORD = "admin1234";
+        
+        // 실제 교육 진행 날짜
+        const TARGET_DATES = [
+            "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-19"
+        ];
+
+        // 1일 1차수이므로 제외할 특정 세션 없음
+        const EXCLUDED_SESSIONS = [];
+
+        // 달력 노출 기간 (6/14 일요일 ~ 6/20 토요일)
+        const RANGE_START = new Date("2026-06-14");
+        const RANGE_END = new Date("2026-06-20");
+        
+        const TERMS = "개인정보 수집 및 이용에 동의합니다. (수집항목: 대리점명, 이름, 연락처 / 보유기간: 교육 종료 후 1년)";
+
+        // --- 2. 상태 관리 ---
+        let state = {
+            view: 'registration',
+            user: null,
+            registrations: [],
+            selectedDate: "2026-06-16", // 기본 선택 날짜 변경
+            selectedTime: "정규", // 1일 1차수이므로 기본 선택 처리
+            isAdminAuthenticated: false,
+            isSubmitting: false,
+            settings: {
+                startAt: "",
+                endAt: ""
+            }
+        };
+
+        let db, auth;
+
+        function setState(newState) {
+            state = { ...state, ...newState };
+            render();
+        }
+
+        // --- 3. 핵심 함수 ---
+        async function initFirebase() {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                await signInAnonymously(auth);
+                onAuthStateChanged(auth, (user) => {
+                    state.user = user;
+                    if (user) {
+                        listenToData();
+                        listenToSettings();
+                    }
+                });
+            } catch (err) {
+                console.error("Firebase Init Error:", err);
+                render();
+            }
+        }
+
+        function listenToData() {
+            const q = collection(db, 'artifacts', appId, 'public', 'data', 'registrations');
+            onSnapshot(q, (snap) => {
+                state.registrations = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                render(); 
+            });
+        }
+
+        function listenToSettings() {
+            const docRef = doc(db, 'artifacts', appId, 'settings', 'config');
+            onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    state.settings = docSnap.data();
+                }
+                render();
+            });
+        }
+
+        window.selectDate = (date) => {
+            // 날짜 선택 시 자동으로 단일 세션('정규')이 선택되도록 설정
+            setState({ selectedDate: date, selectedTime: '정규' });
+        };
+
+        window.selectTime = (time) => {
+            setState({ selectedTime: time });
+        };
+
+        async function handleRegister(e) {
+            e.preventDefault();
+            
+            const now = new Date();
+            if (state.settings.startAt && new Date(state.settings.startAt) > now) return alert("아직 접수 기간이 아닙니다.");
+            if (state.settings.endAt && new Date(state.settings.endAt) < now) return alert("접수 기간이 종료되었습니다.");
+
+            if (!state.selectedDate || !state.selectedTime) return alert("교육 일자를 선택해주세요.");
+            
+            const agency = document.getElementById('input-agency').value;
+            const name = document.getElementById('input-name').value;
+            const phone = document.getElementById('input-phone').value;
+            const agreed = document.getElementById('input-agree').checked;
+
+            if (!agreed) return alert("개인정보 동의가 필요합니다.");
+
+            setState({ isSubmitting: true });
+
+            try {
+                await runTransaction(db, async (transaction) => {
+                    const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'registrations'));
+                    const snap = await getDocs(q);
+                    const count = snap.docs.filter(d => 
+                        d.data().date === state.selectedDate && 
+                        d.data().time === state.selectedTime
+                    ).length;
+
+                    if (count >= MAX_CAPACITY) throw new Error("이미 해당 회차의 정원이 마감되었습니다.");
+
+                    const newDocRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'registrations'));
+                    transaction.set(newDocRef, {
+                        agency, name, phone,
+                        date: state.selectedDate,
+                        time: state.selectedTime,
+                        createdAt: new Date().toISOString(),
+                        userId: state.user.uid
+                    });
+                });
+                setState({ view: 'success', isSubmitting: false });
+            } catch (err) {
+                alert(err.message);
+                setState({ isSubmitting: false });
+            }
+        }
+
+        window.deleteRegistration = async (id) => {
+            if (!confirm("해당 신청 내역을 삭제하시겠습니까?")) return;
+            try {
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'registrations', id));
+            } catch (err) {
+                alert("삭제 실패: " + err.message);
+            }
+        };
+
+        window.updateSettings = async () => {
+            const startAt = document.getElementById('settings-start').value;
+            const endAt = document.getElementById('settings-end').value;
+            try {
+                const docRef = doc(db, 'artifacts', appId, 'settings', 'config');
+                await setDoc(docRef, { startAt, endAt });
+                alert("설정이 저장되었습니다.");
+            } catch (err) {
+                alert("저장 실패: " + err.message);
+            }
+        };
+
+        // --- 4. 렌더링 엔진 ---
+        function renderCalendar() {
+            const dates = [];
+            let current = new Date(RANGE_START);
+            while (current <= RANGE_END) {
+                dates.push(new Date(current));
+                current.setDate(current.getDate() + 1);
+            }
+
+            const formatISO = (d) => d.toISOString().split('T')[0];
+
+            return `
+                <div class="calendar-grid">
+                    ${['일','월','화','수','목','금','토'].map(d => `<div class="text-center text-[11px] font-bold text-slate-400 py-1">${d}</div>`).join('')}
+                    ${dates.map(d => {
+                        const dateStr = formatISO(d);
+                        const isTarget = TARGET_DATES.includes(dateStr);
+                        const isSelected = state.selectedDate === dateStr;
+                        const day = d.getDate();
+                        const month = d.getMonth() + 1;
+                        const isSunday = d.getDay() === 0;
+                        const isSaturday = d.getDay() === 6;
+
+                        return `
+                            <div onclick="${isTarget ? `window.selectDate('${dateStr}')` : ''}" 
+                                class="calendar-day text-sm ${isTarget ? 'target has-dot' : 'disabled'} ${isSelected ? 'selected' : ''}">
+                                <span class="text-[10px] opacity-60 mb-0.5">${day === 1 || d.getTime() === RANGE_START.getTime() ? month + '/' : ''}</span>
+                                <span class="${!isTarget ? '' : isSunday ? 'text-red-500' : isSaturday ? 'text-blue-500' : ''} ${isSelected ? '!text-white' : ''}">${day}</span>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            `;
+        }
+
+        function render() {
+            const appDiv = document.getElementById('app');
+            if (!appDiv) return;
+
+            const currentAgency = document.getElementById('input-agency')?.value || "";
+            const currentName = document.getElementById('input-name')?.value || "";
+            const currentPhone = document.getElementById('input-phone')?.value || "";
+            const currentAgree = document.getElementById('input-agree')?.checked || false;
+
+            if (state.view === 'registration') {
+                const now = new Date();
+                const isStarted = !state.settings.startAt || new Date(state.settings.startAt) <= now;
+                const isEnded = state.settings.endAt && new Date(state.settings.endAt) < now;
+                const canRegister = isStarted && !isEnded;
+
+                appDiv.innerHTML = `
+                    <nav class="bg-white border-b sticky top-0 z-20">
+                        <div class="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
+                            <h1 class="font-bold text-slate-800 text-base md:text-lg flex items-center gap-2">
+                                <span class="bg-blue-600 text-white w-8 h-8 rounded-lg flex items-center justify-center"><i class="fa-solid fa-graduation-cap text-sm"></i></span>
+                                2026년 캐스케이드/NFB790 오프라인 교육 신청
+                            </h1>
+                            <button onclick="window.toAdmin()" class="p-2 text-slate-400 hover:text-blue-600 transition-colors">
+                                <i class="fa-solid fa-gear"></i>
+                            </button>
+                        </div>
+                    </nav>
+
+                    <main class="max-w-5xl mx-auto px-4 py-6 md:py-10">
+                        ${!canRegister ? `
+                            <div class="bg-amber-50 border border-amber-200 p-6 rounded-2xl mb-8 text-center text-amber-800 shadow-sm animate-pulse">
+                                <p class="font-bold">${isEnded ? '접수 기간이 종료되었습니다.' : '아직 접수 기간이 아닙니다.'}</p>
+                            </div>
+                        ` : ''}
+
+                        <form id="main-form" class="grid grid-cols-1 lg:grid-cols-2 gap-8 ${!canRegister ? 'opacity-50 pointer-events-none' : ''}">
+                            <!-- Left Section -->
+                            <div class="space-y-6">
+                                <section class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                                    <h2 class="text-lg font-bold mb-6 flex items-center gap-2"><i class="fa-solid fa-id-card text-blue-500"></i> 신청자 정보</h2>
+                                    <div class="space-y-4">
+                                        <div>
+                                            <label class="text-sm font-semibold text-slate-600 block mb-1">대리점명</label>
+                                            <input id="input-agency" type="text" required placeholder="대리점명을 입력하세요" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all" value="${currentAgency}">
+                                        </div>
+                                        <div class="grid grid-cols-2 gap-4">
+                                            <div>
+                                                <label class="text-sm font-semibold text-slate-600 block mb-1">성함</label>
+                                                <input id="input-name" type="text" required placeholder="이름" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all" value="${currentName}">
+                                            </div>
+                                            <div>
+                                                <label class="text-sm font-semibold text-slate-600 block mb-1">연락처</label>
+                                                <input id="input-phone" type="tel" required placeholder="010-0000-0000" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all" value="${currentPhone}">
+                                            </div>
+                                        </div>
+                                        <div class="pt-4 border-t">
+                                            <label class="flex items-start gap-3 cursor-pointer group">
+                                                <input id="input-agree" type="checkbox" required class="mt-1 w-4 h-4 rounded text-blue-600 border-slate-300 focus:ring-blue-500" ${currentAgree ? 'checked' : ''}>
+                                                <span class="text-xs text-slate-500 leading-relaxed group-hover:text-slate-700 transition-colors">${TERMS}</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                </section>
+
+                                <div class="bg-blue-50 p-5 rounded-2xl border border-blue-100">
+                                    <h4 class="text-sm font-bold text-blue-800 mb-2 flex items-center gap-2"><i class="fa-solid fa-circle-info"></i> 교육 안내</h4>
+                                    <ul class="text-xs text-blue-700 space-y-1.5 list-disc pl-4 opacity-80 font-medium">
+                                        <li class="text-blue-900 font-bold">본 교육은 1일 1차수로 진행됩니다.</li>
+                                        <li>정원 충족 시 해당 회차는 조기 마감될 수 있습니다. (일 30명)</li>
+                                        <li>교육 시작 전까지 입실 완료 부탁드립니다.</li>
+                                        <li class="font-bold underline">신청 내역 변경은 관리자에게 문의 바랍니다.</li>
+                                    </ul>
+                                </div>
+                            </div>
+
+                            <!-- Right Section -->
+                            <div class="space-y-6">
+                                <section class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                                    <h2 class="text-lg font-bold mb-6 flex items-center gap-2"><i class="fa-solid fa-calendar-days text-blue-500"></i> 교육 날짜 (6/16 - 6/19)</h2>
+                                    <div class="calendar-container">
+                                        ${renderCalendar()}
+                                    </div>
+                                    
+                                    <div class="mt-8 pt-6 border-t">
+                                        <div class="flex items-center justify-between mb-4">
+                                            <h3 class="text-sm font-bold text-slate-700">
+                                                <i class="fa-solid fa-clock mr-1 text-blue-400"></i> 
+                                                <span class="text-blue-600">${state.selectedDate}</span> 신청 현황
+                                            </h3>
+                                        </div>
+                                        <div class="grid grid-cols-1 gap-4">
+                                            ${['정규'].map(time => {
+                                                const regs = state.registrations.filter(r => r.date === state.selectedDate && r.time === time).length;
+                                                const remaining = MAX_CAPACITY - regs;
+                                                const isDisabled = remaining <= 0;
+                                                const isSelected = state.selectedTime === time;
+
+                                                return `
+                                                    <div class="session-btn p-4 rounded-2xl border-2 text-left transition-all ${
+                                                            isSelected ? 'selected' :
+                                                            !isDisabled ? 'bg-white border-slate-100' : 
+                                                            'bg-slate-100 border-transparent opacity-50 cursor-not-allowed'
+                                                        }">
+                                                        <div class="flex justify-between items-center">
+                                                            <div class="font-bold ${!isDisabled ? 'text-slate-800' : 'text-slate-400'}">
+                                                                일일 교육 세션 (1차수)
+                                                            </div>
+                                                            <div class="text-right">
+                                                                <div class="text-[10px] text-slate-400 mb-1">신청인원 ${regs}/${MAX_CAPACITY}</div>
+                                                                <div class="text-[14px] font-bold ${!isDisabled ? 'text-blue-600' : 'text-red-500'}">
+                                                                    ${remaining <= 0 ? '정원 마감' : remaining + '석 남음'}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                `;
+                                            }).join('')}
+                                        </div>
+                                    </div>
+
+                                    <div class="mt-8 pt-6 border-t">
+                                        <button type="submit" class="w-full bg-blue-600 text-white py-5 rounded-xl font-bold shadow-lg shadow-blue-100 hover:bg-blue-700 active:scale-[0.99] transition-all flex items-center justify-center gap-2">
+                                            신청하기 <i class="fa-solid fa-paper-plane text-sm"></i>
+                                        </button>
+                                        <p class="text-center text-[11px] text-slate-400 mt-3">정보 입력과 날짜 선택을 모두 마친 후 버튼을 눌러주세요.</p>
+                                    </div>
+                                </section>
+                            </div>
+                        </form>
+                    </main>
+                    ${state.isSubmitting ? '<div class="fixed inset-0 loading-overlay flex items-center justify-center z-50"><div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div></div>' : ''}
+                `;
+                document.getElementById('main-form')?.addEventListener('submit', handleRegister);
+            } 
+            
+            else if (state.view === 'admin') {
+                if (!state.isAdminAuthenticated) {
+                    appDiv.innerHTML = `
+                        <div class="min-h-screen flex items-center justify-center p-4 bg-slate-50">
+                            <div class="bg-white p-8 rounded-2xl shadow-sm border w-full max-w-md">
+                                <h2 class="text-xl font-bold mb-6">관리자 로그인</h2>
+                                <input id="admin-pw" type="password" class="w-full p-4 border rounded-xl mb-4 outline-none focus:ring-2 focus:ring-blue-500" placeholder="비밀번호">
+                                <button onclick="window.loginAdmin()" class="w-full bg-slate-900 text-white py-3 rounded-xl font-bold hover:bg-black transition-colors">로그인</button>
+                                <button onclick="window.setView('registration')" class="w-full mt-4 text-slate-400 text-sm hover:underline text-center block">돌아가기</button>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    appDiv.innerHTML = `
+                        <nav class="bg-white border-b sticky top-0 z-20">
+                            <div class="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
+                                <h1 class="font-bold text-slate-800 flex items-center gap-2"><i class="fa-solid fa-user-shield text-blue-600"></i> 관리자 패널</h1>
+                                <button onclick="window.setView('registration')" class="bg-slate-100 text-slate-600 px-4 py-2 rounded-lg text-sm font-bold hover:bg-slate-200 transition-colors">나가기</button>
+                            </div>
+                        </nav>
+                        <main class="max-w-6xl mx-auto px-4 py-8 space-y-8">
+                            <section class="bg-white p-6 rounded-2xl shadow-sm border">
+                                <h2 class="text-lg font-bold mb-4 flex items-center gap-2"><i class="fa-solid fa-clock text-blue-500"></i> 접수 기간 설정</h2>
+                                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+                                    <div>
+                                        <label class="text-xs text-slate-500 mb-1 block">시작 일시</label>
+                                        <input id="settings-start" type="datetime-local" class="w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" value="${state.settings.startAt || ''}">
+                                    </div>
+                                    <div>
+                                        <label class="text-xs text-slate-500 mb-1 block">종료 일시</label>
+                                        <input id="settings-end" type="datetime-local" class="w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" value="${state.settings.endAt || ''}">
+                                    </div>
+                                    <button onclick="window.updateSettings()" class="bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 transition-colors">설정 저장</button>
+                                </div>
+                            </section>
+
+                            <div class="bg-white rounded-2xl shadow-sm border overflow-hidden">
+                                <div class="p-4 bg-slate-50 border-b flex justify-between items-center">
+                                    <h3 class="font-bold text-slate-700">신청 명단 (${state.registrations.length}명)</h3>
+                                </div>
+                                <div class="overflow-x-auto">
+                                    <table class="w-full text-sm text-left">
+                                        <thead class="bg-slate-50 text-slate-500 font-semibold">
+                                            <tr>
+                                                <th class="px-6 py-4">교육일자</th>
+                                                <th class="px-6 py-4">대리점</th>
+                                                <th class="px-6 py-4">신청자</th>
+                                                <th class="px-6 py-4">연락처</th>
+                                                <th class="px-6 py-4 text-center">관리</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody class="divide-y">
+                                            ${state.registrations.sort((a,b) => b.createdAt.localeCompare(a.createdAt)).map(r => `
+                                                <tr class="hover:bg-slate-50 transition">
+                                                    <td class="px-6 py-4 font-bold text-blue-600">${r.date}</td>
+                                                    <td class="px-6 py-4">${r.agency}</td>
+                                                    <td class="px-6 py-4 font-semibold text-slate-800">${r.name}</td>
+                                                    <td class="px-6 py-4 text-slate-600">${r.phone}</td>
+                                                    <td class="px-6 py-4 text-center">
+                                                        <button onclick="window.deleteRegistration('${r.id}')" class="text-red-400 hover:text-red-600 p-2 rounded transition-colors">
+                                                            <i class="fa-solid fa-trash-can"></i>
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            `).join('')}
+                                        </tbody>
+                                    </table>
+                                    ${state.registrations.length === 0 ? '<div class="p-12 text-center text-slate-400">신청 내역이 없습니다.</div>' : ''}
+                                </div>
+                            </div>
+                        </main>
+                    `;
+                }
+            }
+
+            else if (state.view === 'success') {
+                appDiv.innerHTML = `
+                    <div class="min-h-screen flex items-center justify-center p-4">
+                        <div class="bg-white p-12 rounded-3xl shadow-xl border text-center max-w-sm w-full space-y-6 animate-in zoom-in duration-300">
+                            <div class="w-20 h-20 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto text-3xl shadow-sm">
+                                <i class="fa-solid fa-check"></i>
+                            </div>
+                            <div class="space-y-2">
+                                <h2 class="text-2xl font-bold text-slate-800">신청이 완료되었습니다!</h2>
+                                <p class="text-slate-500">2026년 캐스케이드/NFB790 오프라인 교육 신청이 성공적으로 접수되었습니다.</p>
+                            </div>
+                            <button onclick="location.reload()" class="w-full bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 transition-colors">홈으로 돌아가기</button>
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        window.setView = (view) => setState({ view });
+        window.toAdmin = () => setState({ view: 'admin' });
+        window.loginAdmin = () => {
+            const val = document.getElementById('admin-pw').value;
+            if (val === ADMIN_PASSWORD) setState({ isAdminAuthenticated: true });
+            else alert("비밀번호가 틀렸습니다.");
+        };
+
+        initFirebase();
+        render();
+
+    </script>
+</body>
+</html>
