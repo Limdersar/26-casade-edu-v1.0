@@ -61,7 +61,7 @@
 <body>
     <div id="app"></div>
 
-    <!-- 커스텀 알림/확인 메시지 창 (Browser alert/confirm 완벽 대체) -->
+    <!-- 커스텀 알림/확인 메시지 창 -->
     <div id="custom-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
         <div class="bg-white rounded-2xl max-w-sm w-full p-6 shadow-xl transform scale-95 transition-all duration-200">
             <h3 id="modal-title" class="text-lg font-bold text-slate-800 mb-2">알림</h3>
@@ -79,7 +79,6 @@
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
 
         // --- 1. 환경 설정 ---
-        // 사용자가 제공한 신규 Firebase 설정값 반영 완료
         const firebaseConfig = {
             apiKey: "AIzaSyARW4-gtr78PVp56p7zIF6f0mdTRluWGw0",
             authDomain: "cas01-65c1b.firebaseapp.com",
@@ -91,7 +90,8 @@
         };
 
         const appId = 'navien-cascade-edu-2026'; 
-        const MAX_CAPACITY = 30;
+        // 1차수당 인원을 33명으로 변경
+        const MAX_CAPACITY = 33;
         const ADMIN_PASSWORD = "admin1234";
         
         const TARGET_DATES = [
@@ -201,7 +201,7 @@
                 state.registrations = snap.docs.map(d => ({ id: d.id, ...d.data() }));
                 render(); 
             }, (error) => {
-                console.error("Firestore Listen Error. 규칙 만료 여부 및 인증 활성화를 확인하세요:", error);
+                console.error("Firestore Listen Error:", error);
             });
         }
 
@@ -408,8 +408,9 @@
                                     <h4 class="text-sm font-bold text-blue-800 mb-2 flex items-center gap-2"><i class="fa-solid fa-circle-info"></i> 교육 안내</h4>
                                     <ul class="text-xs text-blue-700 space-y-1.5 list-disc pl-4 opacity-80 font-medium">
                                         <li class="text-blue-900 font-bold">본 교육은 1일 1차수로 진행됩니다.</li>
-                                        <li>정원 충족 시 해당 회차는 조기 마감될 수 있습니다. (일 30명)</li>
+                                        <li>정원 충족 시 해당 회차는 조기 마감될 수 있습니다. (일 ${MAX_CAPACITY}명)</li>
                                         <li>교육 시작 전까지 입실 완료 부탁드립니다.</li>
+                                        <li class="font-bold text-red-600">일정 확정 안내 문자는 발송되지 않으니, 접수하신 일정에 참석 부탁드립니다.</li>
                                         <li class="font-bold underline">신청 내역 변경은 관리자에게 문의 바랍니다.</li>
                                     </ul>
                                 </div>
@@ -488,6 +489,12 @@
                         </div>
                     `;
                 } else {
+                    // 접수 순서를 알 수 있도록 등록일자 오름차순으로 정렬한 뒤 번호 부여
+                    const sortedRegs = [...state.registrations].sort((a,b) => a.createdAt.localeCompare(b.createdAt));
+                    
+                    // 렌더링을 위해 다시 화면상에는 최근 가입순(최신순)으로 뒤집어서 출력하되, 고유 번호(Index)는 등록순으로 부여
+                    const displayRegs = [...sortedRegs].reverse();
+
                     appDiv.innerHTML = `
                         <nav class="bg-white border-b sticky top-0 z-20">
                             <div class="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
@@ -519,6 +526,7 @@
                                     <table class="w-full text-sm text-left">
                                         <thead class="bg-slate-50 text-slate-500 font-semibold">
                                             <tr>
+                                                <th class="px-6 py-4 text-center w-16">No.</th>
                                                 <th class="px-6 py-4">교육일자</th>
                                                 <th class="px-6 py-4">대리점</th>
                                                 <th class="px-6 py-4">신청자</th>
@@ -527,19 +535,24 @@
                                             </tr>
                                         </thead>
                                         <tbody class="divide-y">
-                                            ${state.registrations.sort((a,b) => b.createdAt.localeCompare(a.createdAt)).map(r => `
-                                                <tr class="hover:bg-slate-50 transition">
-                                                    <td class="px-6 py-4 font-bold text-blue-600">${r.date}</td>
-                                                    <td class="px-6 py-4">${r.agency}</td>
-                                                    <td class="px-6 py-4 font-semibold text-slate-800">${r.name}</td>
-                                                    <td class="px-6 py-4 text-slate-600">${r.phone}</td>
-                                                    <td class="px-6 py-4 text-center">
-                                                        <button onclick="window.deleteRegistration('${r.id}')" class="text-red-400 hover:text-red-600 p-2 rounded transition-colors">
-                                                            <i class="fa-solid fa-trash-can"></i>
-                                                        </button>
-                                                    </td>
-                                                </tr>
-                                            `).join('')}
+                                            ${displayRegs.map(r => {
+                                                // 최초 가입 순서 기준 번호 계산 (sortedRegs에서의 인덱스 + 1)
+                                                const originalIndex = sortedRegs.findIndex(item => item.id === r.id) + 1;
+                                                return `
+                                                    <tr class="hover:bg-slate-50 transition">
+                                                        <td class="px-6 py-4 text-center font-bold text-slate-400">${originalIndex}</td>
+                                                        <td class="px-6 py-4 font-bold text-blue-600">${r.date}</td>
+                                                        <td class="px-6 py-4">${r.agency}</td>
+                                                        <td class="px-6 py-4 font-semibold text-slate-800">${r.name}</td>
+                                                        <td class="px-6 py-4 text-slate-600">${r.phone}</td>
+                                                        <td class="px-6 py-4 text-center">
+                                                            <button onclick="window.deleteRegistration('${r.id}')" class="text-red-400 hover:text-red-600 p-2 rounded transition-colors">
+                                                                <i class="fa-solid fa-trash-can"></i>
+                                                            </button>
+                                                        </td>
+                                                    </tr>
+                                                `;
+                                            }).join('')}
                                         </tbody>
                                     </table>
                                     ${state.registrations.length === 0 ? '<div class="p-12 text-center text-slate-400">신청 내역이 없습니다.</div>' : ''}
@@ -553,13 +566,15 @@
             else if (state.view === 'success') {
                 appDiv.innerHTML = `
                     <div class="min-h-screen flex items-center justify-center p-4">
-                        <div class="bg-white p-12 rounded-3xl shadow-xl border text-center max-w-sm w-full space-y-6 animate-in zoom-in duration-300">
+                        <div class="bg-white p-12 rounded-3xl shadow-xl border text-center max-w-lg w-full space-y-6 animate-in zoom-in duration-300">
                             <div class="w-20 h-20 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto text-3xl shadow-sm">
                                 <i class="fa-solid fa-check"></i>
                             </div>
-                            <div class="space-y-2">
+                            <div class="space-y-4">
                                 <h2 class="text-2xl font-bold text-slate-800">신청이 완료되었습니다!</h2>
-                                <p class="text-slate-500">2026년 캐스케이드/NFB790 오프라인 교육 신청이 성공적으로 접수되었습니다.</p>
+                                <p class="text-slate-500 text-sm leading-relaxed text-left bg-slate-50 p-5 rounded-2xl border border-slate-100">
+                                    신청이 완료되었습니다. 접수하신 일정에 대한 별도의 확정 문자는 안내드리지 않으니, 현재 신청하신 날짜로 교육 참석 부탁드립니다. 일정 변경이 필요하신 경우에는 <span class="font-bold text-blue-600">02-559-8381</span> 로 연락 부탁드립니다.
+                                </p>
                             </div>
                             <button onclick="location.reload()" class="w-full bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 transition-colors">홈으로 돌아가기</button>
                         </div>
